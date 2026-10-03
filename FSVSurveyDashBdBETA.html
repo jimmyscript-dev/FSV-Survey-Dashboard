@@ -1968,7 +1968,18 @@
         let row = [];
         let value = "";
         let quoted = false;
+        let line = 1;
+        let rowLine = 1;
         text = text.replace(/^\uFEFF/, "");
+        const finishRow = () => {
+          row.push(value.trim());
+          if (row.some((cell) => cell !== "")) {
+            row.lineNumber = rowLine;
+            rows.push(row);
+          }
+          row = [];
+          value = "";
+        };
 
         for (let i = 0; i < text.length; i++) {
           const char = text[i];
@@ -1979,6 +1990,7 @@
             } else if (char === '"') {
               quoted = false;
             } else {
+              if (char === "\n" || (char === "\r" && text[i + 1] !== "\n")) line++;
               value += char;
             }
           } else if (char === '"' && value.trim().length === 0) {
@@ -1989,18 +2001,16 @@
             value = "";
           } else if (char === "\n" || char === "\r") {
             if (char === "\r" && text[i + 1] === "\n") i++;
-            row.push(value.trim());
-            if (row.some((cell) => cell !== "")) rows.push(row);
-            row = [];
-            value = "";
+            finishRow();
+            line++;
+            rowLine = line;
           } else {
             value += char;
           }
         }
 
         if (quoted) throw new Error("CSV contains an unclosed quoted field.");
-        row.push(value.trim());
-        if (row.some((cell) => cell !== "")) rows.push(row);
+        finishRow();
         return rows;
       }
 
@@ -2021,15 +2031,27 @@
         if (!workbook.SheetNames.length) {
           throw new Error("The Excel workbook does not contain a worksheet.");
         }
-        return workbook.SheetNames.map((name) => ({
-          name,
-          rows: XLSX.utils.sheet_to_json(workbook.Sheets[name], {
+        return workbook.SheetNames.map((name) => {
+          const worksheet = workbook.Sheets[name];
+          const firstRow = worksheet["!ref"]
+            ? XLSX.utils.decode_range(worksheet["!ref"]).s.r + 1
+            : 1;
+          const rows = XLSX.utils.sheet_to_json(worksheet, {
             header: 1,
             defval: "",
             raw: true,
-            blankrows: false,
-          }),
-        }));
+            blankrows: true,
+          });
+          rows.forEach((cells, index) => {
+            cells.lineNumber = firstRow + index;
+          });
+          return {
+            name,
+            rows: rows.filter((cells) =>
+              cells.some((value) => value !== "" && value !== null && value !== undefined),
+            ),
+          };
+        });
       }
 
       function extractSurveyRecords(sheets) {
@@ -2077,10 +2099,13 @@
 
           let guessedSource = 0;
           dataRows.forEach((cells, offset) => {
-            const rowLabel = `"${sheet.name}" row ${rowIndex + offset + 2}`;
+            const rowLabel = `"${sheet.name}" row ${cells.lineNumber ?? rowIndex + offset + 2}`;
             const className = text(cells, "className");
             if (!className) return;
-            if (normalizeHeaderName(className) === "total" || /^(grand\s*)?total$/i.test(className)) return;
+            if (/^(grand|sub)?totals?$/.test(normalizeHeaderName(className))) {
+              warnings.push(`${rowLabel}: "${className}" looks like a totals row, row skipped`);
+              return;
+            }
 
             const metrics = {};
             surveyMetricFields.forEach((field) => {
@@ -2108,7 +2133,8 @@
             let surveyDate = normalizeSpreadsheetDate(surveyDateRaw);
             const startDate = normalizeSpreadsheetDate(startDateRaw);
             if (surveyDateRaw !== "" && surveyDateRaw != null && !surveyDate) {
-              warnings.push(`${rowLabel}: could not read survey date "${surveyDateRaw}"`);
+              warnings.push(`${rowLabel}: could not read survey date "${surveyDateRaw}", row skipped`);
+              return;
             }
             surveyDate = surveyDate || startDate;
             if (!surveyDate) {
@@ -2177,7 +2203,7 @@
             });
           });
           if (guessedSource) {
-            notes.push(`"${sheet.name}" has no survey source column; ${guessedSource} rows were treated as ${sheetSource || "FE (OCP periods as Qualtrics)"}`);
+            notes.push(`"${sheet.name}" has no survey source column; ${guessedSource} row${guessedSource === 1 ? " was" : "s were"} treated as ${sheetSource || "FE (OCP periods as Qualtrics)"}`);
           }
           const missingOptional = ["trainer", "surveyDate", "period", "responseCount", "eligibleCount"]
             .filter((field) => mapping[field] === undefined && !(field === "period" && mapping.phase !== undefined));
@@ -2260,7 +2286,7 @@
               );
               console.warn("Survey import row issues", warnings);
             }
-            status.textContent = `Imported ${records.length} survey rows for ${Object.keys(imported).length} class${Object.keys(imported).length === 1 ? "" : "es"} from ${file.name} (${usedSheets.length > 1 ? "sheets" : "sheet"}: ${usedSheets.join(", ")}).${savedForReload ? " Data will be restored on this browser next time." : " Warning: browser storage failed, so this import will be lost when the page closes."}${details.length ? ` Notes: ${details.join(". ")}.` : ""}`;
+            status.textContent = `Imported ${records.length} survey row${records.length === 1 ? "" : "s"} for ${Object.keys(imported).length} class${Object.keys(imported).length === 1 ? "" : "es"} from ${file.name} (${usedSheets.length > 1 ? "sheets" : "sheet"}: ${usedSheets.join(", ")}).${savedForReload ? " Data will be restored on this browser next time." : " Warning: browser storage failed, so this import will be lost when the page closes."}${details.length ? ` Notes: ${details.join(". ")}.` : ""}`;
           })
           .catch((error) => {
             status.textContent = `Import failed: ${error.message}`;
