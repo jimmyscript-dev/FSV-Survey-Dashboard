@@ -166,7 +166,7 @@
             <input
               id="surveyCsvInput"
               type="file"
-              accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+              accept=".csv,.tsv,.txt,.xlsx,.xlsm,.xlsb,.xls,.ods,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
               class="hidden"
               onchange="importSurveyFile(event)"
             />
@@ -260,14 +260,14 @@
 
         <div class="space-y-2">
           <p id="importStatus" class="rounded-lg bg-blue-950/25 px-3 py-2 text-sm text-blue-50 break-words" role="status" aria-live="polite">
-            Import a survey summary CSV to replace sample data for this page session. Use one row per class, source, and survey period; the template lists the required columns.
+            Import an Excel or CSV survey file to replace the sample data. Columns are matched by name, so exports with different layouts, extra columns, or several sheets can be imported.
           </p>
           <details class="rounded-lg bg-white/10 px-3 py-2 text-sm">
             <summary class="csv-format-toggle cursor-pointer font-semibold text-blue-50">
               Excel / CSV file requirements
             </summary>
             <p class="mt-2 text-xs leading-relaxed text-blue-100">
-              Import an Excel workbook (.xlsx or .xls) or CSV file. The first worksheet (or CSV header row) must use the template column names, with one survey result per row. Excel dates are supported; CSV dates must use YYYY-MM-DD. Use source FE or QUALTRICS and exact period labels (for example, FST W1 or OCP W1). Counts are whole numbers; scores and rating metrics are 0&ndash;100. Leave all three NPS counts blank if unavailable. Optional comments can be newline-separated; set comment_type to SIGNIFICANT, GOOD_PRACTICE, OPPORTUNITY, or OTHER.
+              Import an Excel workbook (.xlsx, .xlsm, .xls, .ods) or CSV file (comma, semicolon, or tab separated). Every sheet is scanned and the header row is found automatically, even below title rows. Only a class/wave column and a score or rating column are required; common names such as Wave, Trainer Name, Facilitator, Date Submitted, CSAT, Overall Score, Responses, Headcount, Phase + Week, and Feedback are recognized. Dates can be Excel dates, YYYY-MM-DD, or M/D/YYYY. Periods like &ldquo;FST Week 1&rdquo;, &ldquo;fst-w1&rdquo;, or Phase=PST + Week=2 are normalized. Scores may be 0&ndash;100, percentages, 0&ndash;1 fractions, or 1&ndash;5 / 0&ndash;10 ratings. Missing source is taken from the sheet name (e.g. a &ldquo;Qualtrics&rdquo; sheet). One row per respondent also works: each row counts as one response, and a 0&ndash;10 &ldquo;likelihood to recommend&rdquo; column is used for NPS. Rows that cannot be read are skipped and listed in the import message.
             </p>
           </details>
         </div>
@@ -653,7 +653,7 @@
     <!-- Application Logic -->
     <script>
       // Labels QUARTERY and Monthly Filter
-      const feLabels = [
+      const defaultFeLabels = [
         "FST W1",
         "FST W2",
         "PST W1",
@@ -662,7 +662,7 @@
         "PST W4",
         "PST W5",
       ];
-      const fsvLabels = [
+      const defaultFsvLabels = [
         "PST W1",
         "PST W2",
         "PST W3",
@@ -672,6 +672,8 @@
         "OCP W2",
         "OCP W3",
       ];
+      let feLabels = [...defaultFeLabels];
+      let fsvLabels = [...defaultFsvLabels];
 
       // Extracted Dataset from Fiserv Weekly Survey Data.xlsx
       let database = {
@@ -874,73 +876,51 @@
             throw new Error("Saved survey data has an unsupported format.");
           }
           const restored = {};
-          payload.classes.forEach((entry) => {
+          const seenClasses = new Set();
+          const entries = payload.classes.map((entry) => {
             if (
               !entry ||
               typeof entry.className !== "string" ||
               !entry.className.trim() ||
-              typeof entry.trainer !== "string" ||
               !Array.isArray(entry.records) ||
-              Object.prototype.hasOwnProperty.call(restored, entry.className)
+              seenClasses.has(entry.className)
             ) {
               throw new Error("Saved survey data contains an invalid class entry.");
             }
-            const records = entry.records;
-            records.forEach((record) => {
-              if (!record || !record.metrics || typeof record.metrics !== "object") {
-                throw new Error(
-                  `Saved survey data for "${entry.className}" contains an invalid record.`,
-                );
-              }
-              const labels =
-                record.source === "FE" ? feLabels : fsvLabels;
+            seenClasses.add(entry.className);
+            entry.records.forEach((record) => {
+              const isCount = (value) => Number.isInteger(value) && value >= 0;
+              const isPercent = (value) =>
+                value === null || (Number.isFinite(value) && value >= 0 && value <= 100);
               if (
+                !record ||
+                !record.metrics ||
+                typeof record.metrics !== "object" ||
                 (record.source !== "FE" && record.source !== "QUALTRICS") ||
-                !labels.includes(record.period) ||
+                typeof record.period !== "string" ||
                 !/^\d{4}-\d{2}-\d{2}$/.test(record.surveyDate) ||
-                !Number.isInteger(record.responseCount) ||
-                record.responseCount < 0 ||
-                !Number.isInteger(record.eligibleCount) ||
-                record.eligibleCount < record.responseCount ||
-                (record.score !== null &&
-                  (!Number.isFinite(record.score) ||
-                    record.score < 0 ||
-                    record.score > 100)) ||
-                typeof record.metrics !== "object"
+                !isCount(record.responseCount) ||
+                !(record.eligibleCount === null || record.eligibleCount === undefined || isCount(record.eligibleCount)) ||
+                !isPercent(record.score) ||
+                ["promoters", "passives", "detractors"].some(
+                  (field) => record[field] !== null && !isCount(record[field]),
+                ) ||
+                surveyMetricFields.some(
+                  (metric) => !isPercent(record.metrics[metric] ?? null),
+                )
               ) {
                 throw new Error(
                   `Saved survey data for "${entry.className}" contains an invalid record.`,
                 );
               }
-              ["promoters", "passives", "detractors"].forEach((field) => {
-                if (
-                  record[field] !== null &&
-                  (!Number.isInteger(record[field]) || record[field] < 0)
-                ) {
-                  throw new Error(
-                    `Saved survey data for "${entry.className}" contains an invalid ${field} count.`,
-                  );
-                }
-              });
-              [
-                "trainerEffectiveness",
-                "materialRelevance",
-                "equipment",
-                "overallExperience",
-              ].forEach((metric) => {
-                const value = record.metrics[metric];
-                if (
-                  value !== null &&
-                  (!Number.isFinite(value) || value < 0 || value > 100)
-                ) {
-                  throw new Error(
-                    `Saved survey data for "${entry.className}" contains an invalid ${metric} score.`,
-                  );
-                }
-              });
+              if (record.eligibleCount === undefined) record.eligibleCount = null;
             });
-            restored[entry.className] = summarizeSurveyRecords(records, {
-              trainer: entry.trainer,
+            return entry;
+          });
+          rebuildPeriodLabels(entries.flatMap((entry) => entry.records));
+          entries.forEach((entry) => {
+            restored[entry.className] = summarizeSurveyRecords(entry.records, {
+              trainer: typeof entry.trainer === "string" ? entry.trainer : "Not specified",
               startDate: entry.startDate,
             });
           });
@@ -949,7 +929,7 @@
           }
           database = restored;
           document.getElementById("importStatus").textContent =
-            `Restored imported survey data for ${Object.keys(restored).length} classes from this browser.`;
+            `Restored imported survey data for ${Object.keys(restored).length} class${Object.keys(restored).length === 1 ? "" : "es"} from this browser.`;
           return true;
         } catch (error) {
           console.error("Could not restore imported survey data", error);
@@ -1656,14 +1636,14 @@
 
           const instructions = [
             ["Fiserv Survey Dashboard - Excel Import Template"],
-            ["Use the Survey Data sheet for imports. Keep the header names in row 1 unchanged."],
-            ["Enter one survey result per row. Use Excel date cells for start_date and survey_date."],
-            ["source must be FE or QUALTRICS. Use the exact period labels shown below."],
+            ["Columns are matched by header name, so order does not matter and extra columns are ignored."],
+            ["Enter one survey result per row (or one row per respondent). Excel dates, YYYY-MM-DD, and M/D/YYYY are accepted."],
+            ["source can be FE/Foundever or QUALTRICS/FSV. Periods like FST W1, FST Week 1, or fst-w1 are accepted."],
             ["FE periods: FST W1, FST W2, PST W1, PST W2, PST W3, PST W4, PST W5."],
             ["Qualtrics periods: PST W1, PST W2, PST W3, PST W4, PST W5, OCP W1, OCP W2, OCP W3."],
-            ["Scores and rating measures must be from 0 to 100. Counts must be whole numbers."],
-            ["NPS counts may be left blank if unavailable; otherwise enter all three counts."],
-            ["comments and comment_type are optional. Categories: SIGNIFICANT, GOOD_PRACTICE, OPPORTUNITY, OTHER."],
+            ["Scores can be 0-100, percentages, 0-1 fractions, or 1-5 / 0-10 ratings. Only class and score are required."],
+            ["NPS counts may be left blank if unavailable; blank counts are treated as 0 when others are provided."],
+            ["comments and comment_type are optional. Categories: SIGNIFICANT, GOOD_PRACTICE, OPPORTUNITY, OTHER (others map to OTHER)."],
             ["Delete the example row before entering real survey results."],
           ];
           const instructionsSheet =
@@ -1683,11 +1663,323 @@
         }
       }
 
-      function parseCsv(text) {
+      const surveyFieldAliases = {
+        trainerEffectiveness: {
+          exact: ["trainereffectiveness", "trainerscore", "trainerrating", "trainersatisfaction", "facilitatoreffectiveness", "facilitatorscore", "facilitatorrating", "instructoreffectiveness", "instructorrating"],
+          contains: ["trainereffectiveness", "facilitatoreffectiveness", "trainerperformance"],
+        },
+        materialRelevance: {
+          exact: ["materialrelevance", "materialsrelevance", "materials", "material", "materialscore", "contentrelevance", "learningmaterials", "content", "contentscore"],
+          contains: ["materialrelevance", "materialsrelevance", "learningmaterial", "contentrelevance"],
+        },
+        equipment: {
+          exact: ["equipment", "equipmentscore", "equipmenttech", "technology", "tech", "infrastructure", "systems", "tools"],
+          contains: ["equipment", "infrastructure"],
+        },
+        overallExperience: {
+          exact: ["overallexperience", "experience", "overallexp", "experiencescore"],
+          contains: ["overallexperience"],
+        },
+        npsRating: {
+          exact: ["npsrating", "likelihoodtorecommend", "ltr", "recommend", "recommendscore", "recommendationscore", "npsresponse"],
+          contains: ["likelihoodtorecommend", "likelytorecommend", "wouldrecommend"],
+        },
+        className: {
+          exact: ["class", "classname", "wave", "wavename", "classwave", "cohort", "batch", "batchname", "trainingclass", "course", "coursename", "program", "programname", "lob"],
+          contains: ["classname", "wavename", "cohortname"],
+        },
+        trainer: {
+          exact: ["trainer", "trainername", "trainers", "facilitator", "facilitatorname", "instructor", "instructorname", "coach", "leadtrainer"],
+          contains: ["trainername", "facilitatorname"],
+        },
+        startDate: {
+          exact: ["startdate", "classstartdate", "wavestartdate", "trainingstartdate", "start", "classstart", "wavestart", "launchdate"],
+          contains: ["startdate"],
+        },
+        surveyDate: {
+          exact: ["surveydate", "date", "responsedate", "submitteddate", "submissiondate", "completiondate", "completeddate", "recordeddate", "datesubmitted", "enddate", "timestamp", "weekending", "weekenddate"],
+          contains: ["surveydate", "responsedate", "recordeddate", "submitteddate"],
+        },
+        source: {
+          exact: ["source", "surveysource", "surveytype", "survey", "surveyname", "platform", "vendor", "surveytool", "tool"],
+          contains: ["surveysource"],
+        },
+        period: {
+          exact: ["period", "surveyperiod", "phaseweek", "trainingperiod", "milestone", "touchpoint", "surveyweek", "weeklabel"],
+          contains: ["surveyperiod"],
+        },
+        phase: {
+          exact: ["phase", "trainingphase", "stage", "trainingstage"],
+          contains: [],
+        },
+        week: {
+          exact: ["week", "weeknumber", "weekno", "wk", "trainingweek"],
+          contains: [],
+        },
+        score: {
+          exact: ["score", "overallscore", "surveyscore", "csat", "csatscore", "satisfaction", "satisfactionscore", "overallsatisfaction", "averagescore", "avgscore", "average", "rating", "overallrating", "result", "percentage"],
+          contains: ["overallscore", "surveyscore", "csat", "satisfaction"],
+        },
+        responseCount: {
+          exact: ["responsecount", "responses", "respondents", "noofresponses", "numberofresponses", "totalresponses", "surveyscompleted", "completedsurveys", "responded", "surveycount", "nresponses", "n"],
+          contains: ["responsecount", "noofresponses", "numberofresponses", "respondents"],
+        },
+        eligibleCount: {
+          exact: ["eligiblecount", "eligible", "headcount", "hc", "invited", "surveyssent", "sent", "population", "classsize", "enrolled", "attendees", "participants", "totalparticipants", "totalagents", "agents"],
+          contains: ["eligible", "headcount", "classsize"],
+        },
+        promoters: { exact: ["promoters", "promoter", "promotercount"], contains: ["promoter"] },
+        passives: { exact: ["passives", "passive", "neutral", "neutrals", "passivecount"], contains: ["passive"] },
+        detractors: { exact: ["detractors", "detractor", "detractorcount"], contains: ["detractor"] },
+        commentType: {
+          exact: ["commenttype", "commentcategory", "category", "feedbacktype", "feedbackcategory", "sentiment"],
+          contains: ["commenttype", "commentcategory"],
+        },
+      };
+      const commentHeaderPattern = /comment|feedback|verbatim|remark|suggestion|openended|notes?$/;
+      const surveyMetricFields = [
+        "trainerEffectiveness",
+        "materialRelevance",
+        "equipment",
+        "overallExperience",
+      ];
+      const percentScaleFields = ["score", ...surveyMetricFields];
+      const surveyFieldLabels = {
+        score: "score",
+        trainerEffectiveness: "trainer effectiveness",
+        materialRelevance: "material relevance",
+        equipment: "equipment",
+        overallExperience: "overall experience",
+        trainer: "trainer",
+        surveyDate: "survey date",
+        period: "period",
+        responseCount: "response count",
+        eligibleCount: "eligible count",
+      };
+
+      function normalizeHeaderName(value) {
+        return String(value ?? "")
+          .replace(/^\uFEFF/, "")
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, "");
+      }
+
+      function mapSurveyColumns(headerCells) {
+        const headers = headerCells.map(normalizeHeaderName);
+        const mapping = {};
+        const used = new Set();
+        const fields = Object.keys(surveyFieldAliases);
+        ["exact", "contains"].forEach((mode) => {
+          fields.forEach((field) => {
+            if (mapping[field] !== undefined) return;
+            for (const alias of surveyFieldAliases[field][mode]) {
+              const index = headers.findIndex(
+                (header, columnIndex) =>
+                  header &&
+                  !used.has(columnIndex) &&
+                  (mode === "exact" ? header === alias : header.includes(alias)),
+              );
+              if (index >= 0) {
+                mapping[field] = index;
+                used.add(index);
+                break;
+              }
+            }
+          });
+        });
+        mapping.comments = headers
+          .map((header, index) => (header && !used.has(index) && commentHeaderPattern.test(header) ? index : -1))
+          .filter((index) => index >= 0);
+        return mapping;
+      }
+
+      function scoreSurveyHeaderRow(mapping) {
+        const hasMeasure = percentScaleFields.some((field) => mapping[field] !== undefined) ||
+          mapping.npsRating !== undefined;
+        if (mapping.className === undefined || !hasMeasure) return 0;
+        return Object.keys(surveyFieldAliases).filter((field) => mapping[field] !== undefined).length +
+          (mapping.comments.length ? 1 : 0);
+      }
+
+      function findSurveyHeaderRow(rows) {
+        let best = null;
+        rows.slice(0, 30).forEach((cells, rowIndex) => {
+          const mapping = mapSurveyColumns(cells);
+          const score = scoreSurveyHeaderRow(mapping);
+          if (score > 0 && (!best || score > best.score)) {
+            best = { rowIndex, mapping, score };
+          }
+        });
+        return best;
+      }
+
+      function formatIsoDate(year, month, day) {
+        const date = new Date(Date.UTC(year, month - 1, day));
+        if (
+          !Number.isFinite(year) || year < 1900 || year > 2200 ||
+          date.getUTCFullYear() !== year ||
+          date.getUTCMonth() !== month - 1 ||
+          date.getUTCDate() !== day
+        ) {
+          return null;
+        }
+        return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+      }
+
+      function normalizeSpreadsheetDate(value) {
+        if (value === null || value === undefined || value === "") return null;
+        if (value instanceof Date) {
+          if (Number.isNaN(value.getTime())) return null;
+          return formatIsoDate(value.getFullYear(), value.getMonth() + 1, value.getDate());
+        }
+        if (typeof value === "number") {
+          if (!Number.isFinite(value) || value < 1 || value > 200000 || !window.XLSX) return null;
+          const parsed = XLSX.SSF.parse_date_code(value);
+          return parsed ? formatIsoDate(parsed.y, parsed.m, parsed.d) : null;
+        }
+        const text = String(value).trim();
+        if (!text) return null;
+        let match = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[T\s].*)?$/.exec(text);
+        if (match) return formatIsoDate(Number(match[1]), Number(match[2]), Number(match[3]));
+        match = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2}|\d{4})(?:\s.*)?$/.exec(text);
+        if (match) {
+          let first = Number(match[1]);
+          let second = Number(match[2]);
+          let year = Number(match[3]);
+          if (year < 100) year += 2000;
+          // Month/day order is ambiguous; assume M/D unless the first part cannot be a month.
+          if (first > 12 && second <= 12) [first, second] = [second, first];
+          return formatIsoDate(year, first, second);
+        }
+        if (/^\d+(\.\d+)?$/.test(text)) return normalizeSpreadsheetDate(Number(text));
+        const parsed = new Date(text.replace(/(\d)(st|nd|rd|th)\b/gi, "$1"));
+        if (!Number.isNaN(parsed.getTime())) {
+          return formatIsoDate(parsed.getFullYear(), parsed.getMonth() + 1, parsed.getDate());
+        }
+        return null;
+      }
+
+      function parseFlexibleNumber(value) {
+        if (value === null || value === undefined) return { value: null, percent: false };
+        if (typeof value === "number") {
+          return { value: Number.isFinite(value) ? value : null, percent: false };
+        }
+        if (typeof value === "boolean" || value instanceof Date) return { value: null, percent: false };
+        const text = String(value).trim();
+        if (!text || /^(n\/?a|na|none|null|-+|--)$/i.test(text)) {
+          return { value: null, percent: false };
+        }
+        const percent = text.includes("%");
+        const cleaned = text.replace(/[%,\s]/g, "");
+        const ratio = /^(-?\d+(?:\.\d+)?)\/(\d+(?:\.\d+)?)$/.exec(cleaned);
+        if (ratio && Number(ratio[2]) > 0) {
+          return { value: (Number(ratio[1]) / Number(ratio[2])) * 100, percent: true };
+        }
+        const number = Number(cleaned);
+        return { value: Number.isFinite(number) ? number : null, percent };
+      }
+
+      function detectPercentScale(values) {
+        const numbers = values.filter(
+          (entry) => entry.value !== null && !entry.percent,
+        ).map((entry) => entry.value);
+        if (!numbers.length) return { factor: 1, label: "" };
+        const max = Math.max(...numbers);
+        if (max <= 1) return { factor: 100, label: "0\u20131 fractions" };
+        if (max <= 5) return { factor: 20, label: "a 1\u20135 rating scale" };
+        if (max <= 10) return { factor: 10, label: "a 0\u201310 scale" };
+        return { factor: 1, label: "" };
+      }
+
+      function normalizeSurveySource(value) {
+        const text = String(value ?? "").trim().toUpperCase();
+        if (!text) return null;
+        if (/QUAL|FSV|FISERV|CLIENT/.test(text)) return "QUALTRICS";
+        if (/^FE\b|FOUNDEVER|SITEL|INTERNAL/.test(text)) return "FE";
+        return null;
+      }
+
+      function normalizeSurveyPeriod(periodValue, phaseValue, weekValue) {
+        const combined = [phaseValue, periodValue, weekValue]
+          .map((value) => (value === null || value === undefined ? "" : String(value).trim()))
+          .filter(Boolean)
+          .join(" ");
+        const text = combined.toUpperCase().replace(/[_\-]+/g, " ").replace(/\s+/g, " ").trim();
+        if (!text) return null;
+        const phaseMatch = /\b(FST|PST|OCP|NHO|NESTING|OJT)\b|^(FST|PST|OCP)(?=\s*W?\d)/.exec(text);
+        const phase = phaseMatch ? phaseMatch[1] || phaseMatch[2] : null;
+        const weekMatch =
+          /\b(?:W|WK|WEEK)\s*\.?\s*(\d{1,2})\b/.exec(text) ||
+          /(?:FST|PST|OCP)\s*W?\s*(\d{1,2})\b/.exec(text) ||
+          (phase ? /\b(\d{1,2})\b/.exec(text) : null);
+        if (phase && weekMatch) return `${phase} W${Number(weekMatch[1])}`;
+        if (/^\d{1,2}$/.test(text)) return `W${Number(text)}`;
+        return text;
+      }
+
+      const surveyPhaseOrder = ["NHO", "FST", "PST", "NESTING", "OJT", "OCP"];
+
+      function comparePeriodLabels(left, right) {
+        const parse = (label) => {
+          const match = /^([A-Z]+)\s+W(\d+)$/.exec(label);
+          const phase = match ? surveyPhaseOrder.indexOf(match[1]) : -1;
+          return {
+            phase: phase >= 0 ? phase : surveyPhaseOrder.length,
+            week: match ? Number(match[2]) : Number.MAX_SAFE_INTEGER,
+          };
+        };
+        const a = parse(left);
+        const b = parse(right);
+        return a.phase - b.phase || a.week - b.week || left.localeCompare(right);
+      }
+
+      function rebuildPeriodLabels(records) {
+        const fe = new Set(defaultFeLabels);
+        const qualtrics = new Set(defaultFsvLabels);
+        records.forEach((record) => {
+          (record.source === "FE" ? fe : qualtrics).add(record.period);
+        });
+        feLabels = [...fe].sort(comparePeriodLabels);
+        fsvLabels = [...qualtrics].sort(comparePeriodLabels);
+      }
+
+      function normalizeCommentType(value) {
+        const text = String(value ?? "").trim().toUpperCase().replace(/[\s\-]+/g, "_");
+        if (!text) return "OTHER";
+        if (/SIGNIFICANT|CRITICAL|URGENT|ESCALAT/.test(text)) return "SIGNIFICANT";
+        if (/GOOD|POSITIVE|PRAISE|STRENGTH|BEST/.test(text)) return "GOOD_PRACTICE";
+        if (/OPPORTUNIT|IMPROVE|NEGATIVE|OFI|CONCERN|ISSUE/.test(text)) return "OPPORTUNITY";
+        return "OTHER";
+      }
+
+      function detectCsvDelimiter(text) {
+        const firstLines = text.split(/\r?\n/).filter((line) => line.trim()).slice(0, 5).join("\n");
+        const candidates = [",", ";", "\t", "|"];
+        return candidates
+          .map((delimiter) => ({
+            delimiter,
+            count: firstLines.split(delimiter).length - 1,
+          }))
+          .sort((a, b) => b.count - a.count)[0].delimiter;
+      }
+
+      function parseCsv(text, delimiter = detectCsvDelimiter(text)) {
         const rows = [];
         let row = [];
         let value = "";
         let quoted = false;
+        let line = 1;
+        let rowLine = 1;
+        text = text.replace(/^\uFEFF/, "");
+        const finishRow = () => {
+          row.push(value.trim());
+          if (row.some((cell) => cell !== "")) {
+            row.lineNumber = rowLine;
+            rows.push(row);
+          }
+          row = [];
+          value = "";
+        };
 
         for (let i = 0; i < text.length; i++) {
           const char = text[i];
@@ -1698,56 +1990,35 @@
             } else if (char === '"') {
               quoted = false;
             } else {
+              if (char === "\n" || (char === "\r" && text[i + 1] !== "\n")) line++;
               value += char;
             }
-          } else if (char === '"' && value.length === 0) {
+          } else if (char === '"' && value.trim().length === 0) {
+            value = "";
             quoted = true;
-          } else if (char === ",") {
+          } else if (char === delimiter) {
             row.push(value.trim());
             value = "";
           } else if (char === "\n" || char === "\r") {
             if (char === "\r" && text[i + 1] === "\n") i++;
-            row.push(value.trim());
-            if (row.some((cell) => cell !== "")) rows.push(row);
-            row = [];
-            value = "";
+            finishRow();
+            line++;
+            rowLine = line;
           } else {
             value += char;
           }
         }
 
         if (quoted) throw new Error("CSV contains an unclosed quoted field.");
-        row.push(value.trim());
-        if (row.some((cell) => cell !== "")) rows.push(row);
+        finishRow();
         return rows;
       }
 
-      function normalizeSpreadsheetDate(value, field, rowNumber) {
-        if (value instanceof Date && !Number.isNaN(value.getTime())) {
-          return `${String(value.getFullYear()).padStart(4, "0")}-${String(
-            value.getMonth() + 1,
-          ).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+      async function readSurveySheets(file) {
+        const isSpreadsheet = /\.(xlsx|xlsm|xlsb|xls|ods)$/i.test(file.name);
+        if (!isSpreadsheet) {
+          return [{ name: file.name, rows: parseCsv(await file.text()) }];
         }
-        if (typeof value === "number" && Number.isFinite(value)) {
-          const parsed = XLSX.SSF.parse_date_code(value);
-          if (parsed) {
-            return `${String(parsed.y).padStart(4, "0")}-${String(
-              parsed.m,
-            ).padStart(2, "0")}-${String(parsed.d).padStart(2, "0")}`;
-          }
-        }
-        const text = value == null ? "" : String(value).trim();
-        if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
-        const usDate = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(text);
-        if (usDate) {
-          return `${usDate[3]}-${usDate[1].padStart(2, "0")}-${usDate[2].padStart(2, "0")}`;
-        }
-        throw new Error(
-          `Row ${rowNumber}: "${field}" must be an Excel date or use YYYY-MM-DD.`,
-        );
-      }
-
-      async function readExcelSurveyRows(file) {
         if (!window.XLSX) {
           throw new Error(
             "Excel import support did not load. Check your internet connection and reload the dashboard.",
@@ -1757,56 +2028,219 @@
           type: "array",
           cellDates: true,
         });
-        const firstSheetName = workbook.SheetNames[0];
-        if (!firstSheetName) {
+        if (!workbook.SheetNames.length) {
           throw new Error("The Excel workbook does not contain a worksheet.");
         }
-        const sheet = workbook.Sheets[firstSheetName];
-        const rawRows = XLSX.utils.sheet_to_json(sheet, {
-          header: 1,
-          defval: "",
-          raw: true,
-          blankrows: false,
-        });
-        if (!rawRows.length) {
-          throw new Error("The first worksheet is empty.");
-        }
-        const headers = rawRows[0].map((value, index) =>
-          String(value ?? "")
-            .replace(index === 0 ? /^\uFEFF/ : /$^/, "")
-            .trim()
-            .toLowerCase(),
-        );
-        const rows = rawRows.slice(1).map((cells, index) => {
-          if (cells.length > headers.length) {
-            throw new Error(
-              `Row ${index + 2}: has more values than the ${headers.length} column headers.`,
-            );
-          }
-          const normalized = Array(headers.length).fill("");
-          cells.forEach((value, columnIndex) => {
-            const header = headers[columnIndex];
-            normalized[columnIndex] =
-              header === "start_date" || header === "survey_date"
-                ? normalizeSpreadsheetDate(value, header, index + 2)
-                : value == null
-                  ? ""
-                  : String(value).trim();
+        return workbook.SheetNames.map((name) => {
+          const worksheet = workbook.Sheets[name];
+          const firstRow = worksheet["!ref"]
+            ? XLSX.utils.decode_range(worksheet["!ref"]).s.r + 1
+            : 1;
+          const rows = XLSX.utils.sheet_to_json(worksheet, {
+            header: 1,
+            defval: "",
+            raw: true,
+            blankrows: true,
           });
-          return normalized;
+          rows.forEach((cells, index) => {
+            cells.lineNumber = firstRow + index;
+          });
+          return {
+            name,
+            rows: rows.filter((cells) =>
+              cells.some((value) => value !== "" && value !== null && value !== undefined),
+            ),
+          };
         });
-        return [rawRows[0].map((value) => String(value ?? "")), ...rows];
       }
 
-      function parseOptionalNumber(value, field, rowNumber, min, max) {
-        if (value === "") return null;
-        const number = Number(value);
-        if (!Number.isFinite(number) || number < min || number > max) {
-          throw new Error(
-            `Row ${rowNumber}: "${field}" must be a number from ${min} to ${max}.`,
-          );
-        }
-        return number;
+      function extractSurveyRecords(sheets) {
+        const warnings = [];
+        const notes = [];
+        const records = [];
+        const usedSheets = [];
+
+        sheets.forEach((sheet) => {
+          const header = findSurveyHeaderRow(sheet.rows);
+          if (!header) {
+            return;
+          }
+          usedSheets.push(sheet.name);
+          const { mapping, rowIndex } = header;
+          const sheetSource = normalizeSurveySource(sheet.name);
+          const dataRows = sheet.rows.slice(rowIndex + 1);
+          const cell = (cells, field) =>
+            mapping[field] === undefined ? "" : cells[mapping[field]];
+          const text = (cells, field) => {
+            const value = cell(cells, field);
+            return value === null || value === undefined ? "" : String(value).trim();
+          };
+
+          const scales = {};
+          percentScaleFields.forEach((field) => {
+            if (mapping[field] === undefined) return;
+            scales[field] = detectPercentScale(
+              dataRows.map((cells) => parseFlexibleNumber(cell(cells, field))),
+            );
+            if (scales[field].label) {
+              notes.push(`"${sheet.name}" ${surveyFieldLabels[field]} values look like ${scales[field].label} and were converted to 0\u2013100`);
+            }
+          });
+          const percentValue = (cells, field) => {
+            const parsed = parseFlexibleNumber(cell(cells, field));
+            if (parsed.value === null) return null;
+            const value = parsed.percent ? parsed.value : parsed.value * scales[field].factor;
+            return Number(value.toFixed(2));
+          };
+          const countValue = (cells, field) => {
+            const parsed = parseFlexibleNumber(cell(cells, field));
+            return parsed.value === null ? null : Math.max(0, Math.round(parsed.value));
+          };
+
+          let guessedSource = 0;
+          dataRows.forEach((cells, offset) => {
+            const rowLabel = `"${sheet.name}" row ${cells.lineNumber ?? rowIndex + offset + 2}`;
+            const className = text(cells, "className");
+            if (!className) return;
+            if (/^(grand|sub)?totals?$/.test(normalizeHeaderName(className))) {
+              warnings.push(`${rowLabel}: "${className}" looks like a totals row, row skipped`);
+              return;
+            }
+
+            const metrics = {};
+            surveyMetricFields.forEach((field) => {
+              metrics[field] = mapping[field] === undefined ? null : percentValue(cells, field);
+            });
+            let score = mapping.score === undefined ? null : percentValue(cells, "score");
+            if (score === null) {
+              const available = surveyMetricFields
+                .map((field) => metrics[field])
+                .filter((value) => value !== null);
+              score = metrics.overallExperience ?? (available.length
+                ? Number((available.reduce((sum, value) => sum + value, 0) / available.length).toFixed(2))
+                : null);
+            }
+            const outOfRange = [score, ...Object.values(metrics)].some(
+              (value) => value !== null && (value < 0 || value > 100),
+            );
+            if (outOfRange) {
+              warnings.push(`${rowLabel}: score is outside 0\u2013100, row skipped`);
+              return;
+            }
+
+            const surveyDateRaw = cell(cells, "surveyDate");
+            const startDateRaw = cell(cells, "startDate");
+            let surveyDate = normalizeSpreadsheetDate(surveyDateRaw);
+            const startDate = normalizeSpreadsheetDate(startDateRaw);
+            if (surveyDateRaw !== "" && surveyDateRaw != null && !surveyDate) {
+              warnings.push(`${rowLabel}: could not read survey date "${surveyDateRaw}", row skipped`);
+              return;
+            }
+            surveyDate = surveyDate || startDate;
+            if (!surveyDate) {
+              warnings.push(`${rowLabel}: no readable survey or start date, row skipped`);
+              return;
+            }
+
+            const period = normalizeSurveyPeriod(
+              cell(cells, "period"),
+              cell(cells, "phase"),
+              cell(cells, "week"),
+            ) || "Unspecified";
+            let source = normalizeSurveySource(text(cells, "source")) || sheetSource;
+            if (!source) {
+              source = /^OCP\b/.test(period) ? "QUALTRICS" : "FE";
+              guessedSource++;
+            }
+
+            let nps = ["promoters", "passives", "detractors"].map((field) =>
+              mapping[field] === undefined ? null : countValue(cells, field),
+            );
+            const npsRating = parseFlexibleNumber(cell(cells, "npsRating")).value;
+            if (nps.every((count) => count === null) && npsRating !== null && npsRating >= 0 && npsRating <= 10) {
+              nps = [npsRating >= 9 ? 1 : 0, npsRating >= 7 && npsRating < 9 ? 1 : 0, npsRating < 7 ? 1 : 0];
+            }
+            const npsProvided = nps.some((count) => count !== null);
+            if (npsProvided) nps = nps.map((count) => count ?? 0);
+
+            let responseCount = countValue(cells, "responseCount");
+            if (responseCount === null) {
+              responseCount = npsProvided && mapping.npsRating === undefined
+                ? nps.reduce((sum, count) => sum + count, 0) || 1
+                : 1;
+            }
+            let eligibleCount = countValue(cells, "eligibleCount");
+            if (eligibleCount !== null && eligibleCount < responseCount) {
+              warnings.push(`${rowLabel}: responses exceed eligible count; eligible count raised to ${responseCount}`);
+              eligibleCount = responseCount;
+            }
+            if (score === null && responseCount > 0 && !npsProvided) {
+              warnings.push(`${rowLabel}: no score found, row skipped`);
+              return;
+            }
+
+            const comments = mapping.comments
+              .flatMap((index) => String(cells[index] ?? "").split(/\r?\n/))
+              .map((comment) => comment.trim())
+              .filter((comment) => comment && !/^(n\/?a|na|none|nil|-+)$/i.test(comment));
+
+            records.push({
+              className,
+              trainer: text(cells, "trainer"),
+              startDate,
+              surveyDate,
+              source,
+              period,
+              score,
+              responseCount,
+              eligibleCount,
+              promoters: npsProvided ? nps[0] : null,
+              passives: npsProvided ? nps[1] : null,
+              detractors: npsProvided ? nps[2] : null,
+              metrics,
+              comments,
+              commentType: normalizeCommentType(text(cells, "commentType")),
+            });
+          });
+          if (guessedSource) {
+            notes.push(`"${sheet.name}" has no survey source column; ${guessedSource} row${guessedSource === 1 ? " was" : "s were"} treated as ${sheetSource || "FE (OCP periods as Qualtrics)"}`);
+          }
+          const missingOptional = ["trainer", "surveyDate", "period", "responseCount", "eligibleCount"]
+            .filter((field) => mapping[field] === undefined && !(field === "period" && mapping.phase !== undefined));
+          if (missingOptional.length) {
+            notes.push(`"${sheet.name}" has no ${missingOptional.map((field) => surveyFieldLabels[field]).join(", ")} column${missingOptional.length > 1 ? "s" : ""}; defaults were used`);
+          }
+        });
+
+        return { records, warnings, notes, usedSheets };
+      }
+
+      function groupSurveyRecordsByClass(records) {
+        const grouped = {};
+        records.forEach((record) => {
+          const entry = grouped[record.className] || (grouped[record.className] = {
+            trainers: [],
+            startDates: [],
+            records: [],
+          });
+          if (record.trainer && !entry.trainers.includes(record.trainer)) {
+            entry.trainers.push(record.trainer);
+          }
+          if (record.startDate) entry.startDates.push(record.startDate);
+          const { trainer, startDate, ...stored } = record;
+          entry.records.push(stored);
+        });
+        const result = {};
+        Object.entries(grouped).forEach(([className, entry]) => {
+          const startDate = entry.startDates.length
+            ? entry.startDates.sort()[0]
+            : entry.records.map((record) => record.surveyDate).sort()[0];
+          result[className] = summarizeSurveyRecords(entry.records, {
+            trainer: entry.trainers.join(" / ") || "Not specified",
+            startDate,
+          });
+        });
+        return result;
       }
 
       function importSurveyFile(event) {
@@ -1815,206 +2249,26 @@
         const status = document.getElementById("importStatus");
         status.textContent = `Reading ${file.name}...`;
 
-        const isExcelFile = /\.xlsx?$/i.test(file.name);
-        (isExcelFile
-          ? readExcelSurveyRows(file)
-          : file.text().then(parseCsv)
-        )
-          .then((rows) => {
-            if (rows.length < 2) {
-              throw new Error("The CSV must contain a header and at least one data row.");
+        readSurveySheets(file)
+          .then((sheets) => {
+            const { records, warnings, notes, usedSheets } =
+              extractSurveyRecords(sheets);
+            if (!usedSheets.length) {
+              const firstHeaders = sheets
+                .map((sheet) => (sheet.rows[0] || []).filter((value) => String(value).trim()).slice(0, 12).join(", "))
+                .filter(Boolean)[0];
+              throw new Error(
+                `Could not find survey columns. The file needs at least a class/wave column and a score or rating column.${firstHeaders ? ` Headers found: ${firstHeaders}.` : ""}`,
+              );
+            }
+            if (!records.length) {
+              throw new Error(
+                `No usable survey rows were found in ${usedSheets.join(", ")}.${warnings.length ? ` ${warnings.slice(0, 3).join("; ")}.` : ""}`,
+              );
             }
 
-            const headers = rows[0].map((header, index) =>
-              (index === 0 ? header.replace(/^\uFEFF/, "") : header)
-                .trim()
-                .toLowerCase(),
-            );
-            const optionalHeaders = ["comments", "comment_type"];
-            const missingHeaders = surveyCsvHeaders.filter(
-              (header) => !optionalHeaders.includes(header),
-            ).filter(
-              (header) => !headers.includes(header),
-            );
-            if (missingHeaders.length) {
-              throw new Error(`Missing required columns: ${missingHeaders.join(", ")}.`);
-            }
-            if (new Set(headers).size !== headers.length) {
-              throw new Error("The CSV contains duplicate column names.");
-            }
-
-            const column = Object.fromEntries(
-              headers.map((header, index) => [header, index]),
-            );
-            const imported = {};
-            const seenPeriods = new Set();
-
-            rows.slice(1).forEach((cells, index) => {
-              const rowNumber = index + 2;
-              if (cells.length !== headers.length) {
-                throw new Error(`Row ${rowNumber}: expected ${headers.length} columns.`);
-              }
-              const get = (name) => {
-                const value = cells[column[name]];
-                return value == null ? "" : String(value).trim();
-              };
-              const className = get("class");
-              const trainer = get("trainer");
-              const startDate = get("start_date");
-              const surveyDate = get("survey_date");
-              const source = get("source").toUpperCase();
-              const period = get("period");
-              if (!className || !trainer) {
-                throw new Error(`Row ${rowNumber}: class and trainer are required.`);
-              }
-              if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) ||
-                  Number.isNaN(Date.parse(`${startDate}T00:00:00`))) {
-                throw new Error(`Row ${rowNumber}: start_date must use YYYY-MM-DD.`);
-              }
-              const [year, month, day] = startDate.split("-").map(Number);
-              const parsedDate = new Date(Date.UTC(year, month - 1, day));
-              if (
-                parsedDate.getUTCFullYear() !== year ||
-                parsedDate.getUTCMonth() !== month - 1 ||
-                parsedDate.getUTCDate() !== day
-              ) {
-                throw new Error(`Row ${rowNumber}: start_date is not a valid calendar date.`);
-              }
-              if (!/^\d{4}-\d{2}-\d{2}$/.test(surveyDate)) {
-                throw new Error(`Row ${rowNumber}: survey_date must use YYYY-MM-DD.`);
-              }
-              const [surveyYear, surveyMonth, surveyDay] = surveyDate.split("-").map(Number);
-              const parsedSurveyDate = new Date(
-                Date.UTC(surveyYear, surveyMonth - 1, surveyDay),
-              );
-              if (
-                parsedSurveyDate.getUTCFullYear() !== surveyYear ||
-                parsedSurveyDate.getUTCMonth() !== surveyMonth - 1 ||
-                parsedSurveyDate.getUTCDate() !== surveyDay
-              ) {
-                throw new Error(`Row ${rowNumber}: survey_date is not a valid calendar date.`);
-              }
-              if (source !== "FE" && source !== "QUALTRICS" && source !== "FSV") {
-                throw new Error(`Row ${rowNumber}: source must be FE or QUALTRICS.`);
-              }
-              const normalizedSource = source === "FSV" ? "QUALTRICS" : source;
-              const labels = source === "FE" ? feLabels : fsvLabels;
-              if (!labels.includes(period)) {
-                throw new Error(`Row ${rowNumber}: "${period}" is not a valid period for ${source}.`);
-              }
-              const responseCount = parseOptionalNumber(
-                get("response_count"), "response_count", rowNumber, 0, Number.MAX_SAFE_INTEGER,
-              );
-              const eligibleCount = parseOptionalNumber(
-                get("eligible_count"), "eligible_count", rowNumber, 0, Number.MAX_SAFE_INTEGER,
-              );
-              if (!Number.isInteger(responseCount) || !Number.isInteger(eligibleCount)) {
-                throw new Error(`Row ${rowNumber}: response_count and eligible_count must be whole numbers.`);
-              }
-              if (responseCount > eligibleCount) {
-                throw new Error(`Row ${rowNumber}: response_count cannot exceed eligible_count.`);
-              }
-              const score = parseOptionalNumber(get("score"), "score", rowNumber, 0, 100);
-              if (responseCount > 0 && score === null) {
-                throw new Error(`Row ${rowNumber}: score is required when response_count is greater than zero.`);
-              }
-              const nps = ["promoters", "passives", "detractors"].map((field) =>
-                parseOptionalNumber(get(field), field, rowNumber, 0, Number.MAX_SAFE_INTEGER),
-              );
-              if (nps.some((count) => count !== null && !Number.isInteger(count))) {
-                throw new Error(`Row ${rowNumber}: NPS counts must be whole numbers.`);
-              }
-              const npsProvided = nps.some((count) => count !== null);
-              if (npsProvided && (nps.some((count) => count === null) ||
-                  nps.reduce((total, count) => total + count, 0) > responseCount)) {
-                throw new Error(`Row ${rowNumber}: NPS counts must be complete and cannot exceed response_count.`);
-              }
-
-              const key = `${className}\u0000${normalizedSource}\u0000${period}\u0000${surveyDate}`;
-              if (seenPeriods.has(key)) {
-                throw new Error(`Row ${rowNumber}: duplicate class/source/period/date entry for ${className}, ${source}, ${period}, ${surveyDate}.`);
-              }
-              seenPeriods.add(key);
-
-              if (!imported[className]) {
-                imported[className] = {
-                  trainer,
-                  startDate,
-                  records: [],
-                  fe_data: Array(feLabels.length).fill(null),
-                  fsv_data: Array(fsvLabels.length).fill(null),
-                  fe_response_counts: Array(feLabels.length).fill(0),
-                  fsv_response_counts: Array(fsvLabels.length).fill(0),
-                  imported: true,
-                  responseCount: 0,
-                  eligibleCount: 0,
-                  scoreTotal: 0,
-                  scoreResponses: 0,
-                  promoters: 0,
-                  passives: 0,
-                  detractors: 0,
-                  npsResponses: 0,
-                  metricTotals: {},
-                  metricResponses: {},
-                  trainerEffectivenessTotal: 0,
-                  trainerEffectivenessResponses: 0,
-                };
-              }
-              const classData = imported[className];
-              if (classData.trainer !== trainer || classData.startDate !== startDate) {
-                throw new Error(`Row ${rowNumber}: trainer and start_date must be consistent for ${className}.`);
-              }
-
-              const metrics = {};
-              [
-                ["trainerEffectiveness", "trainer_effectiveness"],
-                ["materialRelevance", "material_relevance"],
-                ["equipment", "equipment"],
-                ["overallExperience", "overall_experience"],
-              ].forEach(([metric, field]) => {
-                metrics[metric] = parseOptionalNumber(
-                  get(field),
-                  field,
-                  rowNumber,
-                  0,
-                  100,
-                );
-              });
-              const comments = get("comments")
-                .split(/\r?\n/)
-                .map((comment) => comment.trim())
-                .filter(Boolean);
-              const commentType = get("comment_type").toUpperCase() || "OTHER";
-              if (
-                !["SIGNIFICANT", "GOOD_PRACTICE", "OPPORTUNITY", "OTHER"].includes(
-                  commentType,
-                )
-              ) {
-                throw new Error(
-                  `Row ${rowNumber}: comment_type must be SIGNIFICANT, GOOD_PRACTICE, OPPORTUNITY, or OTHER.`,
-                );
-              }
-              classData.records.push({
-                className,
-                surveyDate,
-                source: normalizedSource,
-                period,
-                score,
-                responseCount,
-                eligibleCount,
-                promoters: npsProvided ? nps[0] : null,
-                passives: npsProvided ? nps[1] : null,
-                detractors: npsProvided ? nps[2] : null,
-                metrics,
-                comments,
-                commentType,
-              });
-            });
-
-            Object.entries(imported).forEach(([name, data]) => {
-              imported[name] = summarizeSurveyRecords(data.records, data);
-            });
-
+            rebuildPeriodLabels(records);
+            const imported = groupSurveyRecordsByClass(records);
             database = imported;
             let savedForReload = true;
             try {
@@ -2024,7 +2278,15 @@
               console.error("Could not save imported survey data", error);
             }
             filterClasses();
-            status.textContent = `Imported ${rows.length - 1} survey-period rows for ${Object.keys(imported).length} classes from ${file.name}.${savedForReload ? " Data will be restored on this browser next time." : " Warning: browser storage failed, so this import will be lost when the page closes."} Insights recalculate from available measures and current filters.`;
+
+            const details = [...notes];
+            if (warnings.length) {
+              details.push(
+                `${warnings.length} row issue${warnings.length > 1 ? "s" : ""}: ${warnings.slice(0, 3).join("; ")}${warnings.length > 3 ? "; \u2026 (see browser console)" : ""}`,
+              );
+              console.warn("Survey import row issues", warnings);
+            }
+            status.textContent = `Imported ${records.length} survey row${records.length === 1 ? "" : "s"} for ${Object.keys(imported).length} class${Object.keys(imported).length === 1 ? "" : "es"} from ${file.name} (${usedSheets.length > 1 ? "sheets" : "sheet"}: ${usedSheets.join(", ")}).${savedForReload ? " Data will be restored on this browser next time." : " Warning: browser storage failed, so this import will be lost when the page closes."}${details.length ? ` Notes: ${details.join(". ")}.` : ""}`;
           })
           .catch((error) => {
             status.textContent = `Import failed: ${error.message}`;
@@ -2153,6 +2415,7 @@
           fsv_response_counts: Array(fsvLabels.length).fill(0),
           responseCount: 0,
           eligibleCount: 0,
+          participationResponses: 0,
           scoreTotal: 0,
           scoreResponses: 0,
           promoters: 0,
@@ -2181,7 +2444,10 @@
           const periodIndex = labels.indexOf(record.period);
           if (periodIndex < 0) return;
           result.responseCount += record.responseCount;
-          result.eligibleCount += record.eligibleCount;
+          if (record.eligibleCount !== null && record.eligibleCount !== undefined) {
+            result.eligibleCount += record.eligibleCount;
+            result.participationResponses += record.responseCount;
+          }
           result[countField][periodIndex] += record.responseCount;
           if (record.score !== null && record.responseCount > 0) {
             scoreTotals[dataField][periodIndex] += record.score * record.responseCount;
@@ -2305,6 +2571,7 @@
           [
             "responseCount",
             "eligibleCount",
+            "participationResponses",
             "scoreTotal",
             "scoreResponses",
             "promoters",
@@ -2432,16 +2699,15 @@
         // KPI Cards
 
         document.getElementById("fstAvg").textContent = `Avg: ${calculateAvg(
-          data.fe_data.slice(0, 2),
+          getPhaseScores(data, "FST"),
         )}`;
 
-        document.getElementById("pstAvg").textContent = `Avg: ${calculateAvg([
-          ...data.fe_data.slice(2),
-          ...data.fsv_data.slice(0, 5),
-        ])}`;
+        document.getElementById("pstAvg").textContent = `Avg: ${calculateAvg(
+          getPhaseScores(data, "PST"),
+        )}`;
 
         document.getElementById("ocpAvg").textContent = `Avg: ${calculateAvg(
-          data.fsv_data.slice(5),
+          getPhaseScores(data, "OCP"),
         )}`;
 
         // Charts
@@ -3673,6 +3939,14 @@
         });
       }
 
+      function getPhaseScores(data, phase) {
+        const pick = (labels, values) =>
+          labels
+            .map((label, index) => (label.startsWith(`${phase} `) ? values[index] : null))
+            .filter((value) => value !== null && value !== undefined);
+        return [...pick(feLabels, data.fe_data), ...pick(fsvLabels, data.fsv_data)];
+      }
+
       function calculateAvg(arr) {
         const valid = arr.filter((v) => v !== null && !isNaN(v));
         if (valid.length === 0) return "--%";
@@ -3689,7 +3963,8 @@
 
       function calculateParticipation(data) {
         if (!data.imported || !data.eligibleCount) return "--";
-        return ((data.responseCount / data.eligibleCount) * 100).toFixed(1);
+        const responses = data.participationResponses ?? data.responseCount;
+        return ((responses / data.eligibleCount) * 100).toFixed(1);
       }
 
       function calculateOverallAverage(data) {
